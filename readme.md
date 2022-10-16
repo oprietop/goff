@@ -1,9 +1,9 @@
 # goff
 Naive filefactory downloader
 
-This program will download files from filefactory just retrying on each link until it gets a download slot, so no high sspeeds and resume.
+This program will download files from filefactory just retrying on each link until it gets a download slot, so no high speeds and resume.
 
-It does the job for me when i have to download many files and i'm not in a hurry to have them.
+It does the job if you have to download many files and you are not in a hurry.
 
 ## Usage:
 Just create a `urls.txt` with all the links, one per line and execute the program.
