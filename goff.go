@@ -11,6 +11,8 @@ import (
     "net/url"
     "strings"
     "sync"
+    "encoding/json"
+    "crypto/md5"
 )
 
 const MAX_CONCURRENT_JOBS = 5
@@ -39,6 +41,16 @@ type RunTasks struct {
     loopUrls  map[string]string
 }
 
+// Needed info for each file
+type FileInfo struct {
+    uri     string
+    id      string
+    downUrl string
+    name    string
+    md5     string
+    err     bool
+}
+
 // Struct generator
 func NewRunTasks() *RunTasks {
     tr := &http.Transport{}
@@ -50,6 +62,20 @@ func NewRunTasks() *RunTasks {
         loopUrls: map[string]string{},
     }
 }
+
+// Get the md5 checksum from a file
+func (rt *RunTasks) md5(file string) (sum string) {
+    fileHandle, err := os.Open(file)
+    errLog(err)
+
+    defer fileHandle.Close()
+
+    hash := md5.New()
+    _, err = io.Copy(hash, fileHandle)
+    errLog(err)
+
+    return fmt.Sprintf("%x", hash.Sum(nil))
+ }
 
 // HTTP fetch
 func (rt *RunTasks) fetch(uri string) (result []byte) {
@@ -66,9 +92,9 @@ func (rt *RunTasks) fetch(uri string) (result []byte) {
 }
 
 // HTTP download to disk
-func (rt *RunTasks) download(uri string, name string) (err error) {
+func (rt *RunTasks) download(fi FileInfo) (err error) {
     //res, err := http.Get(uri)
-    req, _ := http.NewRequest("GET", uri, nil)
+    req, _ := http.NewRequest("GET", fi.downUrl, nil)
     res, err := rt.client.Do(req)
     if err != nil  {
         return err
@@ -76,16 +102,16 @@ func (rt *RunTasks) download(uri string, name string) (err error) {
     defer res.Body.Close()
 
     if res.StatusCode != http.StatusOK {
-        log.Println("Non-OK HTTP status:", res.StatusCode, "fetching", name)
+        log.Println("Non-OK HTTP status:", res.StatusCode, "fetching", fi.name)
         return fmt.Errorf("%i", res.StatusCode)
     }
 
     if strings.Contains(res.Header["Content-Type"][0], "down") {
-        log.Println("Fetching", name)
+        log.Println("Fetching", fi.name)
     }
 
     // Create the file and return the handle
-    out, err := os.Create(name)
+    out, err := os.Create(fi.name)
     if err != nil  {
         return err
     }
@@ -99,27 +125,49 @@ func (rt *RunTasks) download(uri string, name string) (err error) {
 
     // Everything went well
     if strings.Contains(res.Header["Content-Type"][0], "down") {
-        log.Println("Finished", name)
+        if rt.md5(fi.name) != fi.md5 {
+            err := os.Remove(fi.name)
+            errLog(err)
+            return fmt.Errorf("Wrong checksum for '%s', redownloading...", fi.name)
+        }
+        log.Println("Finished", fi.name)
         return nil
     }
 
-    return fmt.Errorf("%s - %d - %s", name, res.StatusCode, res.Header["Content-Type"][0])
+    return fmt.Errorf("%s - %d - %s", fi.name, res.StatusCode, res.Header["Content-Type"][0])
 }
 
-// Retrieve the real download URL and filename
-func (rt *RunTasks) getDownUri(uri string) (downUri string, file string) {
-    //page := rt.fetch("GET", uri, nil)
+// Fetch all the info we need from the link
+func (rt *RunTasks) getInfoUri(uri string) (fi FileInfo) {
+    fi.uri = uri
+    splitUri := strings.Split(uri, "/")
+    fi.id = splitUri[len(splitUri)-1]
+    uri = "https://api.filefactory.com/v1/getFileInfo?file=" + fi.id
+    // Fetch the checksum
     page := rt.fetch(uri)
-    splitSD := strings.Split(string(page), "\">Start Download")
-    if len(splitSD) == 1 {
-        return "", ""
+    var result map[string]interface{}
+    json.Unmarshal(page, &result)
+    if result["type"] != "success" {
+        fi.err = true
+        return fi
     }
-    splitHref := strings.Split(splitSD[0], "data-href=\"")
-    downUri = splitHref[len(splitHref)-1]
-    splitUri := strings.Split(downUri, "/")
-    file = splitUri[len(splitUri)-1]
+    fi.md5 = result["result"].
+        (map[string]interface{})["files"].
+        (map[string]interface{})[fi.id].
+        (map[string]interface{})["md5"].
+        (string)
+    uri = "https://api.filefactory.com/v1/getDownloadLink?file=" + fi.id
+    // fetch the download url and filename
+    page = rt.fetch(uri)
+    json.Unmarshal(page, &result)
+    if result["type"] != "success" {
+        fi.err = true
+        return fi
+    }
+    fi.downUrl = result["result"].(map[string]interface{})["url"].(string)
+    fi.name = result["result"].(map[string]interface{})["name"].(string)
 
-    return downUri, file
+    return fi
 }
 
 // Remove finished downloads from urls.txt
@@ -142,20 +190,18 @@ func (rt *RunTasks) updateTxt(uri string) (err error) {
 
 // Wrapper function to run under goroutines
 func (rt *RunTasks) job(uri string) (err error) {
-
-    // Get the real download url and filename
-    downUri, file := rt.getDownUri(uri)
-    if downUri == "" {
-        log.Println("Cound not find file in", uri, "skipping.")
+    fi := rt.getInfoUri(uri)
+    if fi.err {
+        log.Println("Coutd not find file in", uri, "skipping.")
         return nil
     }
-    log.Println(uri, downUri, file)
-    if _, err := os.Stat(file); err == nil {
-        log.Println(file, "exists, skipping.")
+    log.Printf("%+v", fi)
+    if _, err := os.Stat(fi.name); err == nil {
+        log.Println(fi.name, "exists, skipping.")
     } else {
         // Loop until we got our file
         for {
-            err := rt.download(downUri, file)
+            err := rt.download(fi)
             //log.Println(downUri, file)
             if err == nil  {
                 break
@@ -172,7 +218,6 @@ func (rt *RunTasks) job(uri string) (err error) {
 
 func main() {
     rt := NewRunTasks()
-    log.Printf("%+v\n", rt)
 
     content, err := ioutil.ReadFile("urls.txt")
     if err != nil {
@@ -183,6 +228,7 @@ func main() {
     for _, line := range lines {
         line = strings.ToLower(line)
         line = strings.TrimSpace(line)
+        line = strings.TrimRight(line, "/")
         _, err := url.ParseRequestURI(line)
         if err == nil {
             rt.fileUrls[line] = ""
