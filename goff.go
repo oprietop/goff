@@ -192,7 +192,7 @@ func (rt *RunTasks) updateTxt(uri string) (err error) {
 func (rt *RunTasks) job(uri string) (err error) {
     fi := rt.getInfoUri(uri)
     if fi.err {
-        log.Println("Coutd not find file in", uri, "skipping.")
+        log.Println("Could not find file in", uri, "skipping.")
         return nil
     }
     log.Printf("%+v", fi)
